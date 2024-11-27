@@ -1,0 +1,24 @@
+root_dir: "/home/ubuntu/temp/classifier"
+backbone_hf_str: "FacebookAI/roberta-base"
+classifier_head_dims: [100, 2]
+random_seed: 0
+
+dataset_paths:
+  train: "/home/ubuntu/temp/classifier/data/train_withlabels.csv"
+  eval: "/home/ubuntu/temp/classifier/data/dev_withlabels.csv"
+dataset_text_column: comment_processed
+dataset_label_column: attack
+train_sample_max_length: 2500
+
+lr: 0.001
+num_steps_to_train: 10
+train_batch_size: 8
+checkpoint_freq: 2
+pos_weight: 8.0
+neg_weight: 1.0
+
+do_eval: False
+num_steps_per_eval: 10
+eval_batch_size: 8
+
+save_dir: null

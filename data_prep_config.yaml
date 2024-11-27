@@ -1,0 +1,26 @@
+root_dir: "/home/zeef/temp/clavata-classifier-2"
+source_data_dir: null
+source_dataset_name: wikipedia_talk
+download_files: True
+
+raw_text_col: comment
+split_col: split
+id_col: rev_id
+label_col: attack
+
+num_classes: 2
+
+newline_token: NEWLINE_TOKEN
+tab_token: TAB_TOKEN
+
+annotation_aggregation: majority
+aggregation_avg_threshold: null
+
+max_comment_length: 6000
+drop_nonenglish: True
+
+lowercase: True
+strip_accents: ascii
+strip_whitespace: True
+strip_punctuation: True
+strip_tabs_and_newlines: True
