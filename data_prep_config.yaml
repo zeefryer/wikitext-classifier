@@ -1,4 +1,4 @@
-root_dir: "/home/zeef/temp/clavata-classifier-2"
+root_dir: "/data/wikitext-classifier"
 source_data_dir: null
 source_dataset_name: wikipedia_talk
 download_files: True

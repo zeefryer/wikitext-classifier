@@ -37,6 +37,7 @@ from data_utils.utils import df_to_dataset
 """
 TODO
 learning rate scheduler?
+pad final batch size
 """
 
 DEFAULT_HF_ROBERTA = "FacebookAI/roberta-base"
@@ -242,13 +243,16 @@ def consolidate_metrics(metrics):
         dict of consolidated metrics.
     """
     metrics_t = jax.tree.transpose(
-        jax.tree.structure([0 for e in metrics_dict]),
-        jax.tree.structure(metrics_dict[0]),
-        metrics_dict,
+        jax.tree.structure([0 for e in metrics]),
+        jax.tree.structure(metrics[0]),
+        metrics,
     )
     metrics_sum = {k: jnp.array(v).sum().item() for (k, v) in metrics_t.items()}
     denom = metrics_sum.pop("denom")
-    return jax.tree_util.tree_map(lambda x: x / denom, metrics_sum)
+    batch_size = metrics_sum.pop('batch_size')  # don't want to divide this by denom
+    metrics_mean = jax.tree_util.tree_map(lambda x: x / denom, metrics_sum)
+    metrics_mean['batch_size'] = batch_size
+    return metrics_mean
 
 
 @jax.jit
@@ -310,11 +314,12 @@ def evaluate(state, dl_eval):
     """
     iter_eval = iter(dl_eval)
     eval_metrics = []
-    for batch in iter_eval:
+    for i, batch in enumerate(iter_eval):
         metrics = eval_step(
             state, {"inputs": batch["inputs"], "label": batch["label"]}
         )
         eval_metrics.append(metrics)
+        print(f"Eval progress: {i+1}/{len(iter_eval)}", end='\r')
     return consolidate_metrics(eval_metrics)
 
 
@@ -411,7 +416,7 @@ def train(config, clf, datasets):
 
     iter_train = iter(dl_train)
     while state.step < num_steps_to_train:
-        print(f"step: {state.step}", end="\r")
+        print(f"Train step: {state.step+1}/{num_steps_to_train}", end="\r")
         try:
             batch = next(iter_train)
         except StopIteration:
@@ -433,9 +438,9 @@ def train(config, clf, datasets):
             if state.step > 0 and (
                 state.step % num_steps_per_eval == 0 or is_last_step
             ):
-                print(f"running eval loop at step {state.step}", end="\r")
+                print(f"Running eval loop at step {state.step}")
                 eval_metrics = evaluate(state, dl_eval)
-                print(f"eval metrics at step {state.step}: {eval_metrics}")
+                print(f"Eval metrics at step {state.step}: {eval_metrics}")
                 with open(
                     config["metrics_dir"].joinpath("eval.jsonl"), "a"
                 ) as f:
@@ -467,6 +472,8 @@ def main(args):
     with open(config_path) as f:
         train_config = yaml.safe_load(f)
 
+    print(train_config)
+    
     # Use the current date/time to disambiguate training runs
     now = datetime.datetime.now()
     now = datetime.datetime.strftime(now, "%Y%m%d_%H%M%S")
