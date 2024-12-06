@@ -22,7 +22,7 @@ import data_utils.utils as utils
 from langdetect import DetectorFactory  # to make langdetect deterministic
 
 
-DEFAULT_CONFIG_FILENAME = "data_prep_config.yaml"
+DEFAULT_CONFIG_FILENAME = "config/data_prep.yaml"
 VALID_DATASET_NAMES = ["wikipedia_talk"]
 
 
