@@ -16,7 +16,7 @@ The task is:
 - The bulk of the pipeline is consolidated in two files that can each be run as scripts or imported into a notebook for interactive use:
   - `data_preparation.py` downloads the dataset, cleans it up, and processes it into a format that's ready for use in downstream training. 
   - `nn_classifier.py` trains a deep learning model on this dataset, consisting of a RoBERTa backbone and a dense classifier head.
-- Both scripts are controlled by config files, namely `data_prep_config.yaml` and `train_config.yaml` respectively.
+- Both scripts are controlled by config files, namely `config/data_prep.yaml` and `config/train.yaml` respectively.
 
 ## Libraries
 
