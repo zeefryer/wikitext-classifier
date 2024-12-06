@@ -11,14 +11,14 @@ dataset_label_column: attack
 train_sample_max_length: 2500
 
 lr: 0.001
-num_steps_to_train: 10
+num_steps_to_train: 10000
 train_batch_size: 64
-checkpoint_freq: 10
+checkpoint_freq: 500
 pos_weight: 8.0
 neg_weight: 1.0
 
 do_eval: True
-num_steps_per_eval: 10
+num_steps_per_eval: 2500
 eval_batch_size: 64
 
 save_dir: null

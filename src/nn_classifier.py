@@ -40,7 +40,7 @@ pad final batch size
 """
 
 DEFAULT_HF_ROBERTA = "FacebookAI/roberta-base"
-DEFAULT_CONFIG_FILENAME = "train_config.yaml"
+DEFAULT_CONFIG_FILENAME = "config/train.yaml"
 
 
 class TrainState(train_state.TrainState):
