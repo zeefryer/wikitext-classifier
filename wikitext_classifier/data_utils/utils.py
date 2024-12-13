@@ -1,9 +1,10 @@
 """Util functions related to dataset preparation.
 """
 import pathlib
-import requests
 
 import polars as pl
+import requests
+
 from data_utils.dataset import TextDataset
 
 
@@ -16,9 +17,10 @@ def get_dataset_splits(df, splits, source_col):
     return {x: df.filter(pl.col(source_col) == x) for x in splits}
 
 
-def combine_text_and_annotations(
-    df_text, df_annotations, join_col, aggregation_fn=None
-):
+def combine_text_and_annotations(df_text,
+                                 df_annotations,
+                                 join_col,
+                                 aggregation_fn=None):
     """Combine text and annotation dataframes, if initially separate.
 
     Args:
@@ -51,13 +53,12 @@ def df_to_dataset(df, data_col, label_col):
         df: pl.Dataframe, the source dataframe.
         data_col: str, the column name for the samples.
         label_col: str, the column name for the labels.
-    
+
     Returns:
         TextDataset
     """
     return TextDataset(
-        df_col_to_list(df, data_col), df_col_to_list(df, label_col)
-    )
+        df_col_to_list(df, data_col), df_col_to_list(df, label_col))
 
 
 def get_wikipedia_talk_data(save_location):
@@ -90,9 +91,9 @@ def get_wikipedia_talk_data(save_location):
     # Cleanup: convert from tsv to csv
     for k in result:
         v = result[k]
-        pl.read_csv(v, separator="\t").write_csv(
-            v.with_suffix(".csv"), separator=","
-        )
+        pl.read_csv(
+            v, separator="\t").write_csv(
+                v.with_suffix(".csv"), separator=",")
         result[k] = v.with_suffix(".csv")
 
     return result

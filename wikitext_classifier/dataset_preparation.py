@@ -8,19 +8,16 @@ or imported to use individual functions.
 
 import argparse
 import functools
-import os
 import pathlib
 import shutil
-import yaml
 
 import polars as pl
+import yaml
+from langdetect import DetectorFactory  # to make langdetect deterministic
 from sklearn.feature_extraction.text import CountVectorizer
 
-import data_utils.transformation as transformation
-import data_utils.utils as utils
-
-from langdetect import DetectorFactory  # to make langdetect deterministic
-
+import wikitext_classifier.data_utils.transformation as transformation
+import wikitext_classifier.data_utils.utils as utils
 
 DEFAULT_CONFIG_FILENAME = "config/data_prep.yaml"
 VALID_DATASET_NAMES = ["wikipedia_talk"]
@@ -48,8 +45,6 @@ def get_source_data(config, save_location):
             f"Please specify a valid dataset name; options are {VALID_DATASET_NAMES}"
         )
 
-    return None
-
 
 def prepare_dataset_splits(config, source_data_files):
     """Split dataset into logical pieces (e.g. train/eval/test splits).
@@ -72,8 +67,7 @@ def prepare_dataset_splits(config, source_data_files):
         df_comments = pl.read_csv(source_data_files["comments"])
         raw_dataframes = utils.get_dataset_splits(df_comments, splits, "split")
         raw_dataframes["annotations"] = pl.read_csv(
-            source_data_files["annotations"]
-        )
+            source_data_files["annotations"])
         del df_comments
         return raw_dataframes, splits
     else:
@@ -95,17 +89,15 @@ def clean_data(config, df):
     if config["max_comment_length"]:
         char_count_col = f"{config['raw_text_col']}_char_count"
         if char_count_col not in df.columns:
-            df = transformation.get_text_lengths(
-                df, config["raw_text_col"], char_count_col
-            )
+            df = transformation.get_text_lengths(df, config["raw_text_col"],
+                                                 char_count_col)
         df = df.filter(pl.col(char_count_col) <= config["max_comment_length"])
 
     if config["drop_nonenglish"]:
         lang_col = f"{config['raw_text_col']}_language"
         if lang_col not in df.columns:
-            df = transformation.get_language(
-                df, config["raw_text_col"], lang_col
-            )
+            df = transformation.get_language(df, config["raw_text_col"],
+                                             lang_col)
         df = df.filter(pl.col(lang_col) == "en")
 
     return df
@@ -134,12 +126,11 @@ def preprocessing(config, df):
     # strip_accents must happen before strip_punctuation
     if config["strip_accents"] or config["lowercase"]:
         vect = CountVectorizer(
-            strip_accents=config["strip_accents"], lowercase=config["lowercase"]
-        )
+            strip_accents=config["strip_accents"],
+            lowercase=config["lowercase"])
         preproc_fn = vect.build_preprocessor()
         df = df.with_columns(
-            pl.col(proc_col).map_elements(preproc_fn, return_dtype=pl.String)
-        )
+            pl.col(proc_col).map_elements(preproc_fn, return_dtype=pl.String))
 
     if config["strip_punctuation"]:
         if isinstance(config["strip_punctuation"], str):
@@ -183,24 +174,28 @@ def process_dataset(config, raw_dataframes, split, save_location):
             thresh=config["aggregation_avg_threshold"],
         )
 
-    print(f"Processing {split} split of {dataset_name}; size {len(df_text)}")
+        print(
+            f"Processing {split} split of {dataset_name}; size {len(df_text)}")
 
-    # Clean up and preprocess the text samples
-    df_text = clean_data(config, df_text)
-    df_text = preprocessing(config, df_text)
-    df_text.write_csv(save_location.joinpath(f"{split}_nolabels.csv"))
+        # Clean up and preprocess the text samples
+        df_text = clean_data(config, df_text)
+        df_text = preprocessing(config, df_text)
+        df_text.write_csv(save_location.joinpath(f"{split}_nolabels.csv"))
 
-    # Combine the text and annotations
-    df = utils.combine_text_and_annotations(
-        df_text, df_annotations, config["id_col"], aggregation_fn=agg_fn
-    )
-    df.write_csv(save_location.joinpath(f"{split}_withlabels.csv"))
+        # Combine the text and annotations
+        df = utils.combine_text_and_annotations(
+            df_text, df_annotations, config["id_col"], aggregation_fn=agg_fn)
+        df.write_csv(save_location.joinpath(f"{split}_withlabels.csv"))
 
-    print(
-        f"Finished processing {split} split of {dataset_name}; size {len(df_text)}"
-    )
+        print(
+            f"Finished processing {split} split of {dataset_name}; size {len(df_text)}"
+        )
 
-    return df
+        return df
+    else:
+        raise RuntimeError(
+            f"Please specify a valid dataset name; options are {VALID_DATASET_NAMES}"
+        )
 
 
 def main(args):
@@ -240,7 +235,6 @@ def main(args):
         source_data_files = [x for x in source_data_dir.glob("*")]
 
     raw_dataframes, splits = prepare_dataset_splits(config, source_data_files)
-
     """
     The following block handles a bug in langdetect multiprocessing: sometimes the
     lang profiles aren't loaded in time and langdetect throws a LangDetectException.
@@ -249,16 +243,14 @@ def main(args):
     This is solved by calling a small "dummy" run of langdetect before the main loop.
     """
     if config["drop_nonenglish"]:
-        _ = transformation.get_language(
-            raw_dataframes[splits[0]].head(20), config["raw_text_col"]
-        )
+        _ = transformation.get_language(raw_dataframes[splits[0]].head(20),
+                                        config["raw_text_col"])
 
     # Now call the preprocessing steps on each dataframe.
     dataframes = {}
     for split in splits:
-        dataframes[split] = process_dataset(
-            config, raw_dataframes, split, data_dir
-        )
+        dataframes[split] = process_dataset(config, raw_dataframes, split,
+                                            data_dir)
 
     return dataframes
 
