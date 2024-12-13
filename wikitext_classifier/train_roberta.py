@@ -1,12 +1,14 @@
 """JAX/Flax neural net classifier on Roberta backbone.
 
 If called as as script, e.g. 
-`python nn_classifier.py --config=[path to config]`
+`python train_roberta.py --config=[path to config]`
 will train a simple dense text classifier on top of a RoBERTa backbone.
 
-However any function that does not reference RoBERTa in its name is intended to
-be model-agnostic, so an alternative backbone and/or classifier can easily be
-swapped in with minimal changes.
+The overall train/eval loop is model-agnostic, so in order to swap in a
+different backbone or classifier:
+    - define the model in models.py, following the RoBERTa example.
+    - update which model is loaded in the main function, and (if necessary) the
+        dataset collation function in the train function.
 """
 
 # pyright: reportInvalidTypeForm=false
@@ -28,17 +30,16 @@ import polars as pl
 import yaml
 from flax.training import checkpoints, train_state
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer, AutoConfig, FlaxRobertaModel
 
+import wikitext_classifier.models as models
+import wikitext_classifier.metrics as metrics
 from wikitext_classifier.data_utils.utils import df_to_dataset
-
 """
 TODO
 learning rate scheduler?
 pad final batch size
 """
 
-DEFAULT_HF_ROBERTA = "FacebookAI/roberta-base"
 DEFAULT_CONFIG_FILENAME = "config/train.yaml"
 
 
@@ -46,97 +47,6 @@ class TrainState(train_state.TrainState):
     dropout_key: jax.Array
     pos_weight: jnp.float32 = 1.0
     neg_weight: jnp.float32 = 1.0
-
-
-class RobertaTextClassifier(nn.Module):
-    backbone: nn.Module
-    features: tuple[int]
-
-    def setup(self):
-        self.head = [nn.Dense(feat) for feat in self.features]
-
-    def __call__(self, x, train: bool):
-        x = self.backbone(**x, deterministic=not train)["last_hidden_state"]
-        x = x[:, 0, :]  # take the output corresponding to [CLS]
-        for i, L in enumerate(self.head):
-            x = L(x)
-            if i != len(self.features) - 1:
-                x = nn.relu(x)
-        return x
-
-
-def create_roberta_classifier_from_hf(config, pretrained=True):
-    """Initialize a RoBERTa classifier from huggingface.
-
-    Given the name of any huggingface RoBERTa model, this function downloads the
-    model definition, tokenizer, and (optionally) pretrained weights, and
-    creates a new RobertaTextClassifier of type nn.Module consisting of the
-    RoBERTa backbone and a randomly-initialized classifier head.
-
-    Use `pretrained=False` to speed up model initialization when providing your
-    own weights (e.g. from a completed training run). In this setting the config
-    entries `classifier_head_dims` and `backbone_hf_str` need to match those
-    from your training run, but `params_key` can be any arbitrary
-    jax.random.PRNGKey (since it is only used to initialize parameters that are
-    later overwritten).
-
-    Args:
-        config: dict. Must contain 'params_key' (a jax.random.PRNGKey), 
-            'classifier_head_dims' (a tuple specifying the number and size of
-            classifier head layers), and 'backbone_hf_str' (the huggingface
-            string specifying the RoBERTa model).
-        pretrained: bool, default True. If True, downloads the pretrained model
-            weights too; if not, just returns a randomly initialized model.
-
-    Returns:
-        Dict containing the model definition, pytree of model variables, and
-            tokenizer.
-    """
-    rng = config["params_key"]
-    backbone_hf_str = config["backbone_hf_str"] or DEFAULT_HF_ROBERTA
-
-    if config["classifier_head_dims"] is None:
-        classifier_head_dims = (2,)
-    else:
-        classifier_head_dims = tuple(config["classifier_head_dims"])
-
-    # dummy sentence for initializing the models
-    test_sentence = "Here is a random sentence about cats."
-
-    # tokenizer setup
-    tokenizer = AutoTokenizer.from_pretrained(backbone_hf_str)
-    tokenizer = functools.partial(
-        tokenizer, padding="max_length", truncation=True, return_tensors="jax")
-
-    if pretrained:
-        # get the pretrained Roberta model and extract its module and variables
-        backbone = FlaxRobertaModel.from_pretrained(
-            backbone_hf_str, add_pooling_layer=False)
-        backbone_module = backbone.module  # pyright: ignore
-        backbone_params = backbone.params  # pyright: ignore
-    else:
-        r_config = AutoConfig.from_pretrained(config["backbone_hf_str"])
-        backbone = FlaxRobertaModel(r_config, add_pooling_layer=False)
-        backbone_module = backbone.module
-
-    # create and initialize the classifier
-    clf = RobertaTextClassifier(backbone_module, classifier_head_dims)
-    inputs = tokenizer(test_sentence)
-    variables = clf.init(rng, inputs, train=False)
-
-    if pretrained:
-    # update the classifier variables to include the pretrained backbone variables
-        variables["params"]["backbone"] = backbone_params  # pyright: ignore
-
-    return {"model": clf, "variables": variables, "tokenizer": tokenizer}
-
-
-def roberta_collate_fn(data, tokenizer):
-    """RoBERTA-specific collate function for torch dataloader."""
-    text, labels = zip(*data)
-    inputs = dict(tokenizer(list(text)))
-    labels = np.array(labels)
-    return {"text": text, "inputs": inputs, "label": labels}
 
 
 def get_frozen_param_partition(params, rule="backbone"):
@@ -169,112 +79,9 @@ def get_tx(params, train_tx, rule='backbone'):
         "frozen": optax.set_to_zero(),
     }
     param_partitions = get_frozen_param_partition(params, rule)
-    tx = optax.multi_transform(partition_optimizers, param_partitions)  # pyright: ignore
+    tx = optax.multi_transform(partition_optimizers, # pyright: ignore
+                               param_partitions)  
     return tx
-
-
-def compute_weighted_accuracy(logits, labels, weights=None):
-    """Compute weighted accuracy on a batch.
-
-    Args:
-        logits: jax array of logits.
-        labels: jax array of true labels (same shape as logits).
-        weights: optional, weights to be applied to each item (same shape as
-            logits). If not specified, all items are given weight 1.
-
-    Returns:
-        tuple: (weighted accuracy sum, denominator). Actual accuracy on the
-            batch can be obtained as (weighted accuracy sum)/(denominator).
-    """
-    acc = jnp.equal(jnp.argmax(logits, axis=-1), labels)
-    denom = jnp.array(len(labels)).astype(jnp.float32)
-    if weights is not None:
-        acc = acc * weights
-        denom = weights.sum()
-    return acc.sum(), denom
-
-
-def compute_weighted_cross_entropy(logits, labels, weights=None):
-    """Compute weighted cross entropy on a batch.
-
-    Args:
-        logits: jax array of logits.
-        labels: jax array of true labels (same shape as logits).
-        weights: optional, weights to be applied to each item (same shape as
-            logits). If not specified, all items are given weight 1.
-
-    Returns:
-        tuple: (weighted loss sum, denominator). Actual loss on the
-            batch can be obtained as (weighted loss sum)/(denominator).
-    """
-    loss = optax.softmax_cross_entropy_with_integer_labels(logits, labels)
-    denom = jnp.array(len(labels)).astype(jnp.float32)
-    if weights is not None:
-        loss = loss * weights
-        denom = weights.sum()
-    return loss.sum(), denom
-
-
-def compute_metrics(state, logits, labels, weights=None):
-    """Compute desired metrics on a given batch.
-
-    Note: convention for keys is that anything prefixed with w_ is weighted
-    and should be divided by w_denom to obtain the mean; all others are 
-    presumed unweighted should be divided by the batch size.
-
-    Args:
-        state: TrainState, the current state of the model.
-        labels: jax array of true labels (same shape as logits).
-        weights: optional, weights to be applied to each item (same shape as
-            logits). If not specified, all items are given weight 1.
-
-    Returns:
-        dictionary of metrics.
-    """
-    metrics = {}
-
-    loss, w_denom = compute_weighted_cross_entropy(logits, labels, weights)
-    acc, _ = compute_weighted_accuracy(logits, labels, weights=None)
-    w_acc, _ = compute_weighted_accuracy(logits, labels, weights)
-
-    metrics["w_loss"] = loss
-    metrics["acc"] = acc
-    metrics["w_acc"] = w_acc
-    metrics["denom"] = jnp.array(len(labels))
-    metrics["w_denom"] = w_denom
-
-    return metrics
-
-
-def consolidate_metrics(metrics):
-    """Combines metrics from all batches and returns overall score.
-
-    Args:
-        metrics: iterable of dicts, each dict the output of compute_metrics.
-
-    Returns:
-        dict of consolidated metrics.
-    """
-    metrics_t = jax.tree.transpose(
-        jax.tree.structure([0 for e in metrics]),
-        jax.tree.structure(metrics[0]),
-        metrics,
-    )
-    metrics_sum = {k: jnp.array(v).sum().item() for (k, v) in metrics_t.items()}
-    w_denom = metrics_sum.pop("w_denom")
-    denom = metrics_sum.pop('denom')
-
-    metrics_denoms = {
-        k: w_denom if k.startswith('w_') else denom for k in metrics_sum
-    }
-
-    metrics_mean = jax.tree_util.tree_map(lambda x, y: x / y, metrics_sum,
-                                          metrics_denoms)
-
-    metrics_mean['batch_size'] = denom
-    metrics_mean['total_weight'] = w_denom
-
-    return metrics_mean
 
 
 @jax.jit
@@ -292,8 +99,8 @@ def train_step(state, batch):
             rngs={"dropout": dropout_train_key},
         )
 
-        loss, denom = compute_weighted_cross_entropy(logits, batch["label"],
-                                                     weights)
+        loss, denom = metrics.compute_weighted_cross_entropy(
+            logits, batch["label"], weights)
         mean_loss = loss / denom
 
         return mean_loss, logits
@@ -302,7 +109,7 @@ def train_step(state, batch):
     (loss, logits), grads = grad_fn(state.params)
 
     new_state = state.apply_gradients(grads=grads)
-    metrics = compute_metrics(state, logits, batch["label"], weights)
+    metrics = metrics.compute_metrics(state, logits, batch["label"], weights)
 
     return new_state, metrics
 
@@ -315,7 +122,7 @@ def eval_step(state, batch):
     logits = state.apply_fn({"params": state.params},
                             batch["inputs"],
                             train=False)
-    metrics = compute_metrics(state, logits, batch["label"], weights)
+    metrics = metrics.compute_metrics(state, logits, batch["label"], weights)
 
     return metrics
 
@@ -339,7 +146,7 @@ def evaluate(state, dl_eval):
         })
         eval_metrics.append(metrics)
         print(f"Eval progress: {i+1}/{len(iter_eval)}", end='\r')
-    return consolidate_metrics(eval_metrics)
+    return metrics.consolidate_metrics(eval_metrics)
 
 
 def prepare_data(config):
@@ -415,7 +222,7 @@ def train(config, clf, datasets):
         batch_size=config["train_batch_size"],
         shuffle=True,
         collate_fn=functools.partial(
-            roberta_collate_fn, tokenizer=clf["tokenizer"]),
+            models.roberta_collate_fn, tokenizer=clf["tokenizer"]),
     )
     if config["do_eval"]:
         dl_eval = DataLoader(
@@ -423,7 +230,7 @@ def train(config, clf, datasets):
             batch_size=config["eval_batch_size"],
             shuffle=False,
             collate_fn=functools.partial(
-                roberta_collate_fn, tokenizer=clf["tokenizer"]),
+                models.roberta_collate_fn, tokenizer=clf["tokenizer"]),
         )
 
     num_steps_to_train = config["num_steps_to_train"]
@@ -520,7 +327,8 @@ def main(args):
 
     # Set up the datasets and models
     datasets = prepare_data(train_config)
-    clf = create_roberta_classifier_from_hf(train_config, pretrained=True)
+    clf = models.create_roberta_classifier_from_hf(
+        train_config, pretrained=True)
 
     # Finally, trigger the training loop
     trained_model_dir = train(train_config, clf, datasets)
