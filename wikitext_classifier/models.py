@@ -1,6 +1,10 @@
 import functools
+import pathlib
 
 import flax.linen as nn
+from flax.training.checkpoints import restore_checkpoint
+from flax.serialization import msgpack_serialize, msgpack_restore
+from jax._src.dispatch import RuntimeToken
 import numpy as np
 from transformers import AutoTokenizer, AutoConfig, FlaxRobertaModel
 
@@ -84,7 +88,7 @@ def create_roberta_classifier_from_hf(config, pretrained=True):
     variables = clf.init(rng, inputs, train=False)
 
     if pretrained:
-    # update the classifier variables to include the pretrained backbone variables
+        # update the classifier variables to include the pretrained backbone variables
         variables["params"]["backbone"] = backbone_params  # pyright: ignore
 
     return {"model": clf, "variables": variables, "tokenizer": tokenizer}
@@ -95,4 +99,51 @@ def roberta_collate_fn(data, tokenizer):
     text, labels = zip(*data)
     inputs = dict(tokenizer(list(text)))
     labels = np.array(labels)
-    return {"text": text, "inputs": inputs, "label": labels}
+    bs = len(labels)  # used during inference for batch-padding purposes
+    return {"text": text, "inputs": inputs, "label": labels, "bs": bs}
+
+
+def roberta_load_model(config, path):
+    """Load a previously-trained instance of RobertaTextClassifier.
+
+    Args:
+        config: dict, containing the config used to train the original model.
+        path: str or pathlike, pointing to a checkpoint or serialized weights
+            for trained model.
+
+    Returns:
+        Dict containing the model definition, pytree of model variables, and
+            tokenizer.        
+    """
+    clf = create_roberta_classifier_from_hf(config, pretrained=False)
+    variables = load_model_variables(path)
+    clf['variables'] = variables
+    return clf
+
+
+def load_model_variables(path):
+    if isinstance(path, str):
+        path = pathlib.Path(path)
+
+    if path.is_file() and path.suffix == '.msgpack':
+        # flax serialization format
+        with open(path, 'rb') as f:
+            tmp = f.read()
+            result = msgpack_restore(tmp)
+            if 'params' in result.keys():  # pyright: ignore
+                return result
+            elif 'backbone' in result.keys():  # pyright: ignore
+                return {'params': result}
+    elif path.is_dir():
+        if "_CHECKPOINT_METADATA" in [x.name for x in path.iterdir()]:
+            # then we have a native flax checkpoint
+            variables = extract_params_from_checkpoint(path)
+            return variables
+
+    raise RuntimeError(f'Failed to load model params. You provided path {path}')
+
+
+def extract_params_from_checkpoint(path_to_checkpoint):
+    state_dict = restore_checkpoint(path_to_checkpoint, target=None)
+    params = state_dict.pop('params')
+    return {'params': params}

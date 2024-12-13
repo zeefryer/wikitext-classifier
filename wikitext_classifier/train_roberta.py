@@ -221,6 +221,7 @@ def train(config, clf, datasets):
         datasets["train"],
         batch_size=config["train_batch_size"],
         shuffle=True,
+        drop_last=True,
         collate_fn=functools.partial(
             models.roberta_collate_fn, tokenizer=clf["tokenizer"]),
     )
@@ -229,6 +230,7 @@ def train(config, clf, datasets):
             datasets["eval"],
             batch_size=config["eval_batch_size"],
             shuffle=False,
+            drop_last=False,
             collate_fn=functools.partial(
                 models.roberta_collate_fn, tokenizer=clf["tokenizer"]),
         )
