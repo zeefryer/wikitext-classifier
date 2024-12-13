@@ -5,7 +5,7 @@ import pathlib
 import polars as pl
 import requests
 
-from data_utils.dataset import TextDataset
+from wikitext_classifier.data_utils.dataset import TextDataset
 
 
 def consolidate_data(files):
