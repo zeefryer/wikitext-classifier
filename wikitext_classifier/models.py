@@ -8,6 +8,8 @@ from jax._src.dispatch import RuntimeToken
 import numpy as np
 from transformers import AutoTokenizer, AutoConfig, FlaxRobertaModel
 
+import wikitext_classifier.model_utils as model_utils
+
 DEFAULT_HF_ROBERTA = "FacebookAI/roberta-base"
 
 
@@ -28,7 +30,7 @@ class RobertaTextClassifier(nn.Module):
         return x
 
 
-def create_roberta_classifier_from_hf(config, pretrained=True):
+def create_roberta_classifier_from_hf(config, use_hf_pretrained=True):
     """Initialize a RoBERTa classifier from huggingface.
 
     Given the name of any huggingface RoBERTa model, this function downloads the
@@ -36,10 +38,10 @@ def create_roberta_classifier_from_hf(config, pretrained=True):
     creates a new RobertaTextClassifier of type nn.Module consisting of the
     RoBERTa backbone and a randomly-initialized classifier head.
 
-    Use `pretrained=False` to speed up model initialization when providing your
-    own weights (e.g. from a completed training run). In this setting the config
-    entries `classifier_head_dims` and `backbone_hf_str` need to match those
-    from your training run, but `params_key` can be any arbitrary
+    Use `use_hf_pretrained=False` to speed up model initialization when
+    providing your own weights (e.g. from a completed training run). In this
+    setting the config entries `classifier_head_dims` and `backbone_hf_str` need
+    to match those from your training run, but `params_key` can be any arbitrary
     jax.random.PRNGKey (since it is only used to initialize parameters that are
     later overwritten).
 
@@ -48,8 +50,9 @@ def create_roberta_classifier_from_hf(config, pretrained=True):
             'classifier_head_dims' (a tuple specifying the number and size of
             classifier head layers), and 'backbone_hf_str' (the huggingface
             string specifying the RoBERTa model).
-        pretrained: bool, default True. If True, downloads the pretrained model
-            weights too; if not, just returns a randomly initialized model.
+        use_hf_pretrained: bool, default True. If True, downloads the pretrained
+            model weights from too; if not, just returns a randomly initialized
+            model.
 
     Returns:
         Dict containing the model definition, pytree of model variables, and
@@ -69,9 +72,9 @@ def create_roberta_classifier_from_hf(config, pretrained=True):
     # tokenizer setup
     tokenizer = AutoTokenizer.from_pretrained(backbone_hf_str)
     tokenizer = functools.partial(
-        tokenizer, padding="max_length", truncation=True, return_tensors="jax")
+        tokenizer, padding="max_length", return_tensors="jax")
 
-    if pretrained:
+    if use_hf_pretrained:
         # get the pretrained Roberta model and extract its module and variables
         backbone = FlaxRobertaModel.from_pretrained(
             backbone_hf_str, add_pooling_layer=False)
@@ -87,7 +90,7 @@ def create_roberta_classifier_from_hf(config, pretrained=True):
     inputs = tokenizer(test_sentence)
     variables = clf.init(rng, inputs, train=False)
 
-    if pretrained:
+    if use_hf_pretrained:
         # update the classifier variables to include the pretrained backbone variables
         variables["params"]["backbone"] = backbone_params  # pyright: ignore
 
@@ -96,11 +99,17 @@ def create_roberta_classifier_from_hf(config, pretrained=True):
 
 def roberta_collate_fn(data, tokenizer):
     """RoBERTA-specific collate function for torch dataloader."""
-    text, labels = zip(*data)
+    idx, text, labels = zip(*data)
     inputs = dict(tokenizer(list(text)))
     labels = np.array(labels)
     bs = len(labels)  # used during inference for batch-padding purposes
-    return {"text": text, "inputs": inputs, "label": labels, "bs": bs}
+    return {
+        "text": text,
+        "inputs": inputs,
+        "label": labels,
+        "bs": bs,
+        "idx": idx
+    }
 
 
 def roberta_load_model(config, path):
@@ -115,35 +124,8 @@ def roberta_load_model(config, path):
         Dict containing the model definition, pytree of model variables, and
             tokenizer.        
     """
-    clf = create_roberta_classifier_from_hf(config, pretrained=False)
-    variables = load_model_variables(path)
+    clf = create_roberta_classifier_from_hf(config, use_hf_pretrained=False)
+    variables = model_utils.load_model_variables(path)
     clf['variables'] = variables
     return clf
 
-
-def load_model_variables(path):
-    if isinstance(path, str):
-        path = pathlib.Path(path)
-
-    if path.is_file() and path.suffix == '.msgpack':
-        # flax serialization format
-        with open(path, 'rb') as f:
-            tmp = f.read()
-            result = msgpack_restore(tmp)
-            if 'params' in result.keys():  # pyright: ignore
-                return result
-            elif 'backbone' in result.keys():  # pyright: ignore
-                return {'params': result}
-    elif path.is_dir():
-        if "_CHECKPOINT_METADATA" in [x.name for x in path.iterdir()]:
-            # then we have a native flax checkpoint
-            variables = extract_params_from_checkpoint(path)
-            return variables
-
-    raise RuntimeError(f'Failed to load model params. You provided path {path}')
-
-
-def extract_params_from_checkpoint(path_to_checkpoint):
-    state_dict = restore_checkpoint(path_to_checkpoint, target=None)
-    params = state_dict.pop('params')
-    return {'params': params}

@@ -20,4 +20,4 @@ class TextDataset(Dataset):
         if self.transform:
             sample = self.transform(sample)
 
-        return sample, label
+        return idx, sample, label

@@ -1,11 +1,27 @@
 """Util functions related to dataset preparation.
 """
 import pathlib
+import yaml
 
 import polars as pl
 import requests
 
 from wikitext_classifier.data_utils.dataset import TextDataset
+
+def get_config(path_to_config=None, default_config_filename=''):
+    if path_to_config is None:
+        if not default_config_filename:
+            raise RuntimeError("Must provide either path to config file or "
+                "default config filename.")
+        cwd = pathlib.Path(__file__).parent
+        config_path = cwd.joinpath(default_config_filename)
+    else:
+        config_path = pathlib.Path(path_to_config)
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    return config
 
 
 def consolidate_data(files):

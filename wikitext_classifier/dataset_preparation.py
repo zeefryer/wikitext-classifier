@@ -141,7 +141,10 @@ def preprocessing(config, df):
 
     # strip_whitespace should happen last since the other steps introduce spaces
     if config["strip_whitespace"]:
-        df = df.with_columns(pl.col(proc_col).str.replace_all(r"\s{2,}", " "))
+        df = df.with_columns(
+            pl.col(proc_col).str.replace_all(r"\s{2,}", " ")).with_columns(
+                pl.col(proc_col).str.strip_chars_start(" ")).with_columns(
+                    pl.col(proc_col).str.strip_chars_end(" "))
 
     return df
 
@@ -200,14 +203,7 @@ def process_dataset(config, raw_dataframes, split, save_location):
 
 def main(args):
     # Get the config
-    if args.config is None:
-        cwd = pathlib.Path(__file__).parent
-        config_path = cwd.joinpath(DEFAULT_CONFIG_FILENAME)
-    else:
-        config_path = pathlib.Path(args.config)
-
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
+    config = utils.get_config(args.config, DEFAULT_CONFIG_FILENAME)
 
     # Makes langdetect determinstic; delete if not desired
     DetectorFactory.seed = 0

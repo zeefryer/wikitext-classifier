@@ -32,12 +32,12 @@ from flax.training import checkpoints, train_state
 from torch.utils.data import DataLoader
 
 import wikitext_classifier.models as models
+import wikitext_classifier.model_utils as model_utils
 import wikitext_classifier.metrics as metrics
-from wikitext_classifier.data_utils.utils import df_to_dataset
+from wikitext_classifier.data_utils.utils import df_to_dataset, get_config
 """
 TODO
 learning rate scheduler?
-pad final batch size
 """
 
 DEFAULT_CONFIG_FILENAME = "config/train.yaml"
@@ -79,8 +79,9 @@ def get_tx(params, train_tx, rule='backbone'):
         "frozen": optax.set_to_zero(),
     }
     param_partitions = get_frozen_param_partition(params, rule)
-    tx = optax.multi_transform(partition_optimizers, # pyright: ignore
-                               param_partitions)  
+    tx = optax.multi_transform(
+        partition_optimizers,  # pyright: ignore
+        param_partitions)
     return tx
 
 
@@ -109,9 +110,10 @@ def train_step(state, batch):
     (loss, logits), grads = grad_fn(state.params)
 
     new_state = state.apply_gradients(grads=grads)
-    metrics = metrics.compute_metrics(state, logits, batch["label"], weights)
+    batch_metrics = metrics.compute_metrics(state, logits, batch["label"],
+                                            weights)
 
-    return new_state, metrics
+    return new_state, batch_metrics
 
 
 @jax.jit
@@ -122,12 +124,17 @@ def eval_step(state, batch):
     logits = state.apply_fn({"params": state.params},
                             batch["inputs"],
                             train=False)
-    metrics = metrics.compute_metrics(state, logits, batch["label"], weights)
 
-    return metrics
+    # if batch was padded, this drops the padded entries
+    logits = logits[:batch["bs"]]
+
+    batch_metrics = metrics.compute_metrics(state, logits, batch["label"],
+                                            weights)
+
+    return batch_metrics
 
 
-def evaluate(state, dl_eval):
+def evaluate(config, state, dl_eval):
     """Runs an evaluation loop on the provided dataset.
 
     Args:
@@ -140,11 +147,13 @@ def evaluate(state, dl_eval):
     iter_eval = iter(dl_eval)
     eval_metrics = []
     for i, batch in enumerate(iter_eval):
-        metrics = eval_step(state, {
+        # padding ensures each batch is the same size, avoids jit recompile.
+        batch = model_utils.pad_batch(batch, config['eval_batch_size'])
+        batch_metrics = eval_step(state, {
             "inputs": batch["inputs"],
             "label": batch["label"]
         })
-        eval_metrics.append(metrics)
+        eval_metrics.append(batch_metrics)
         print(f"Eval progress: {i+1}/{len(iter_eval)}", end='\r')
     return metrics.consolidate_metrics(eval_metrics)
 
@@ -248,14 +257,14 @@ def train(config, clf, datasets):
             iter_train = iter(dl_train)
             batch = next(iter_train)
 
-        state, metrics = train_step(state, {
+        state, batch_metrics = train_step(state, {
             "inputs": batch["inputs"],
             "label": batch["label"]
         })
-        metrics = {
-            k: v.item() for (k, v) in metrics.items()
+        batch_metrics = {
+            k: v.item() for (k, v) in batch_metrics.items()
         }  # can't serialize ArrayImpl type
-        train_metrics.append(metrics)
+        train_metrics.append(batch_metrics)
         is_last_step = state.step == num_steps_to_train
 
         if config["do_eval"]:
@@ -264,7 +273,8 @@ def train(config, clf, datasets):
             if state.step > 0 and (state.step % num_steps_per_eval == 0 or
                                    is_last_step):
                 print(f"Running eval loop at step {state.step}")
-                eval_metrics = evaluate(state, dl_eval)  # pyright: ignore
+                eval_metrics = evaluate(config, state,
+                                        dl_eval)  # pyright: ignore
                 print(f"Eval metrics at step {state.step}: {eval_metrics}")
                 with open(config["metrics_dir"].joinpath("eval.jsonl"),
                           "a") as f:
@@ -286,54 +296,49 @@ def train(config, clf, datasets):
 
 def main(args):
     # Get the config
-    if args.config is None:
-        cwd = pathlib.Path(__file__).parent
-        config_path = cwd.joinpath(DEFAULT_CONFIG_FILENAME)
-    else:
-        config_path = pathlib.Path(args.config)
+    config = get_config(args.config, DEFAULT_CONFIG_FILENAME)
 
-    with open(config_path) as f:
-        train_config = yaml.safe_load(f)
-
-    print(train_config)
+    print(config)
 
     # Use the current date/time to disambiguate training runs
     now = datetime.datetime.now()
     now = datetime.datetime.strftime(now, "%Y%m%d_%H%M%S")
 
     # Initialize our RNG keys; re-split 'key' if another key is needed in future.
-    key = jax.random.PRNGKey(train_config["random_seed"])
+    key = jax.random.PRNGKey(config["random_seed"])
     key, params_key, dropout_key = jax.random.split(key, 3)
 
     # A bit verbose but helps with debugging if we're explicit about keys here
-    train_config["key"] = key
-    train_config["params_key"] = params_key
-    train_config["dropout_key"] = dropout_key
+    config["key"] = key
+    config["params_key"] = params_key
+    config["dropout_key"] = dropout_key
 
     # Set up subdirs for saving metrics and checkpoints for this run
-    if train_config["save_dir"] is None:
-        train_config["save_dir"] = pathlib.Path(
-            train_config["root_dir"]).joinpath("results")
+    if config["save_dir"] is None:
+        config["save_dir"] = pathlib.Path(
+            config["root_dir"]).joinpath("results")
     else:
-        train_config["save_dir"] = pathlib.Path(train_config["save_dir"])
+        config["save_dir"] = pathlib.Path(config["save_dir"])
     for x in ["metrics", "checkpoints"]:
-        p = train_config["save_dir"].joinpath(now, x)
+        p = config["save_dir"].joinpath(now, x)
         p.mkdir(parents=True, exist_ok=False)
-        train_config[f"{x}_dir"] = p
-    print(f"Saving results to {train_config['metrics_dir'].parent}")
+        config[f"{x}_dir"] = p
+    print(f"Saving results to {config['metrics_dir'].parent}")
 
     # Save a copy of the config for reference
-    with open(train_config["metrics_dir"].parent.joinpath("train_config.yaml"),
+    with open(config["metrics_dir"].parent.joinpath("train_config.yaml"),
               "w") as f:
-        yaml.dump(train_config, f)
+        yaml.dump(config, f)
 
     # Set up the datasets and models
-    datasets = prepare_data(train_config)
-    clf = models.create_roberta_classifier_from_hf(
-        train_config, pretrained=True)
+    datasets = prepare_data(config)
+    clf = models.create_roberta_classifier_from_hf(config, use_hf_pretrained=True)
+
+    # Ensure that the tokenizer is truncating long sequences
+    clf["tokenizer"] = functools.partial(clf["tokenizer"], truncation=True)
 
     # Finally, trigger the training loop
-    trained_model_dir = train(train_config, clf, datasets)
+    trained_model_dir = train(config, clf, datasets)
     print(f"Location of final checkpoint: {trained_model_dir}")
 
 
